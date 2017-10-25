@@ -132,6 +132,14 @@ AS_IF([test "x$WANTS_IPV6" = "xyes"], [
   USES_IPV6=yes
 ])
 
+AC_ARG_WITH([biliip],
+  [--with-biliip,Do not try to use biliip lookup at all],
+  [biliip="${withval}"], [biliip=yes])
+if test "x$biliip" = "xyes"; then
+  AC_DEFINE(ENABLE_BILIIP, [], [Define if you want to have biliip.])
+fi
+
+
 AC_CHECK_FUNC([socket], [],
   [AC_CHECK_LIB([socket], [socket], [], [AC_MSG_ERROR([No socket library found])])])
 

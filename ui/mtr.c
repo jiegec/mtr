@@ -41,12 +41,14 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <ctype.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <locale.h>
 
 #include "mtr.h"
 #include "mtr-curses.h"
@@ -71,6 +73,8 @@
 
 
 char *myname;
+int ip_resolve = 0;
+struct bb_biliip *biliip;
 
 const struct fields data_fields[MAXFLD] = {
     /* key, Remark, Header, Format, Width, CallBackFunc */
@@ -333,7 +337,7 @@ static void parse_arg(
 
         {"inet", 0, NULL, '4'}, /* IPv4 only */
 #ifdef ENABLE_IPV6
-        {"inet6", 0, NULL, '6'},        /* IPv6 only */
+        {"inet6", 0, NULL, '6'}, /* IPv6 only */
 #endif
         {"filename", 1, NULL, 'F'},
 
@@ -350,42 +354,45 @@ static void parse_arg(
         {"csv", 0, NULL, 'C'},
         {"json", 0, NULL, 'j'},
         {"displaymode", 1, NULL, OPT_DISPLAYMODE},
-        {"split", 0, NULL, 'p'},        /* BL */
+        {"split", 0, NULL, 'p'}, /* BL */
         /* maybe above should change to -d 'x' */
+#ifdef ENABLE_BILIIP
+        {"resolve-ip", 0, 0, 'R'},
+#endif
 
         {"no-dns", 0, NULL, 'n'},
         {"show-ips", 0, NULL, 'b'},
-        {"order", 1, NULL, 'o'},        /* fields to display & their order */
+        {"order", 1, NULL, 'o'}, /* fields to display & their order */
 #ifdef HAVE_IPINFO
-        {"ipinfo", 1, NULL, 'y'},       /* IP info lookup */
-        {"aslookup", 0, NULL, 'z'},     /* Do AS lookup (--ipinfo 0) */
+        {"ipinfo", 1, NULL, 'y'},   /* IP info lookup */
+        {"aslookup", 0, NULL, 'z'}, /* Do AS lookup (--ipinfo 0) */
 #endif
 
         {"interval", 1, NULL, 'i'},
         {"report-cycles", 1, NULL, 'c'},
-        {"psize", 1, NULL, 's'},        /* overload psize<0, ->rand(min,max) */
-        {"bitpattern", 1, NULL, 'B'},   /* overload B>255, ->rand(0,255) */
-        {"tos", 1, NULL, 'Q'},  /* typeof service (0,255) */
+        {"psize", 1, NULL, 's'},      /* overload psize<0, ->rand(min,max) */
+        {"bitpattern", 1, NULL, 'B'}, /* overload B>255, ->rand(0,255) */
+        {"tos", 1, NULL, 'Q'},        /* typeof service (0,255) */
         {"mpls", 0, NULL, 'e'},
         {"interface", 1, NULL, 'I'},
         {"address", 1, NULL, 'a'},
-        {"first-ttl", 1, NULL, 'f'},    /* -f & -m are borrowed from traceroute */
+        {"first-ttl", 1, NULL, 'f'}, /* -f & -m are borrowed from traceroute */
         {"max-ttl", 1, NULL, 'm'},
         {"max-unknown", 1, NULL, 'U'},
-        {"udp", 0, NULL, 'u'},  /* UDP (default is ICMP) */
-        {"tcp", 0, NULL, 'T'},  /* TCP (default is ICMP) */
+        {"udp", 0, NULL, 'u'}, /* UDP (default is ICMP) */
+        {"tcp", 0, NULL, 'T'}, /* TCP (default is ICMP) */
 #ifdef HAS_SCTP
         {"sctp", 0, NULL, 'S'}, /* SCTP (default is ICMP) */
 #endif
-        {"port", 1, NULL, 'P'}, /* target port number for TCP/SCTP/UDP */
-        {"localport", 1, NULL, 'L'},    /* source port number for UDP */
-        {"timeout", 1, NULL, 'Z'},      /* timeout for probe sockets */
-        {"gracetime", 1, NULL, 'G'},    /* gracetime for replies after last probe */
+        {"port", 1, NULL, 'P'},      /* target port number for TCP/SCTP/UDP */
+        {"localport", 1, NULL, 'L'}, /* source port number for UDP */
+        {"timeout", 1, NULL, 'Z'},   /* timeout for probe sockets */
+        {"gracetime", 1, NULL,
+         'G'}, /* gracetime for replies after last probe */
 #ifdef SO_MARK
         {"mark", 1, NULL, 'M'}, /* use SO_MARK */
 #endif
-        {NULL, 0, NULL, 0}
-    };
+        {NULL, 0, NULL, 0}};
     enum { num_options = sizeof(long_options) / sizeof(struct option) };
     char short_options[num_options * 2];
     size_t n, p;
@@ -417,6 +424,12 @@ static void parse_arg(
         case 'h':
             usage(stdout);
             break;
+
+#ifdef ENABLE_BILIIP
+        case 'R':
+          ip_resolve = 1;
+          break;
+#endif
 
         case 'r':
             ctl->DisplayMode = DisplayReport;
@@ -816,6 +829,69 @@ int main(
         char *name = argv[optind++];
         append_to_names(&names_head, name);
     }
+
+#ifdef ENABLE_BILIIP
+    setlocale(LC_ALL, "");
+    if (ip_resolve) {
+      biliip = (struct bb_biliip *)calloc(sizeof(struct bb_biliip), 1);
+      biliip->index_start = NULL;
+      biliip->index_end = NULL;
+      biliip->index_ptr = NULL;
+      biliip->nCount = 0;
+      biliip->fp = fopen("/usr/local/share/BiliIP.dat", "rb");
+      if (!biliip->fp) {
+        fprintf(stderr, "mtr: Can't load biliip library, read error\n");
+        exit(EXIT_FAILURE);
+      }
+      fseek(biliip->fp, 1, SEEK_SET);
+      if (fread(&biliip->nCount, sizeof(int), 1, biliip->fp) != 1) {
+        fclose(biliip->fp);
+        fprintf(stderr, "mtr: Can't load biliip library, read error\n");
+        exit(EXIT_FAILURE);
+      }
+      biliip->nCount = htonl(biliip->nCount);
+
+      biliip->index_start =
+          (unsigned int *)calloc(biliip->nCount + 1, sizeof(int));
+      biliip->index_end =
+          (unsigned int *)calloc(biliip->nCount + 1, sizeof(int));
+      biliip->index_ptr =
+          (unsigned int *)calloc(biliip->nCount + 1, sizeof(int));
+
+      fseek(biliip->fp, 0, SEEK_END);
+      biliip->size = ftell(biliip->fp);
+      biliip->mmap =
+          mmap(0, biliip->size, PROT_READ, MAP_SHARED, fileno(biliip->fp), 0);
+
+      fseek(biliip->fp, BILIIP_BASE_PTR, SEEK_SET);
+
+      if (fread((biliip->index_start + 1), sizeof(int), biliip->nCount,
+                biliip->fp) != biliip->nCount) {
+
+        fprintf(stderr, "mtr: Can't load biliip library, read error\n");
+        exit(EXIT_FAILURE);
+      }
+      if (fread((biliip->index_end + 1), sizeof(int), biliip->nCount,
+                biliip->fp) != biliip->nCount) {
+
+        fprintf(stderr, "mtr: Can't load biliip library, read error\n");
+        exit(EXIT_FAILURE);
+      }
+      if (fread((biliip->index_ptr + 1), sizeof(int), biliip->nCount,
+                biliip->fp) != biliip->nCount) {
+
+        fprintf(stderr, "mtr: Can't load biliip library, read error\n");
+        exit(EXIT_FAILURE);
+      }
+
+      int i;
+      for (i = 1; i <= biliip->nCount; i++) {
+        biliip->index_start[i] = htonl(biliip->index_start[i]);
+        biliip->index_end[i] = htonl(biliip->index_end[i]);
+        biliip->index_ptr[i] = htonl(biliip->index_ptr[i]);
+      }
+    }
+#endif
 
     /* default: localhost. */
     if (!names_head)
